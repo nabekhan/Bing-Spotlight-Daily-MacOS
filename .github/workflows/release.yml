@@ -1,0 +1,171 @@
+name: Release Spoon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.1.0"
+        required: true
+        type: string
+      draft:
+        description: "Create as draft release"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  SPOON_NAME: BingSpotlightDaily
+  SPOON_PATH: BingSpotlightDaily.spoon
+
+jobs:
+  release:
+    name: Build and release Spoon
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          tag="${tag#refs/tags/}"
+
+          if [[ -z "${tag}" ]]; then
+            echo "Release tag is empty." >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate Spoon
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d "${SPOON_PATH}"
+          test -f "${SPOON_PATH}/init.lua"
+
+          if [[ -f "${SPOON_PATH}/docs.json" ]]; then
+            python -m json.tool "${SPOON_PATH}/docs.json" >/dev/null
+          fi
+
+      - name: Build release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v zip >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+          fi
+
+          rm -rf dist package
+          mkdir -p dist "package/${SPOON_NAME}.spoon"
+
+          rsync -a \
+            --exclude ".git" \
+            --exclude ".DS_Store" \
+            --exclude "__MACOSX" \
+            --exclude "*.spoon.zip" \
+            "${SPOON_PATH}/" "package/${SPOON_NAME}.spoon/"
+
+          (cd package && zip -r "../dist/${SPOON_NAME}.spoon.zip" "${SPOON_NAME}.spoon")
+
+          if [[ -f "${SPOON_PATH}/docs.json" ]]; then
+            cp "${SPOON_PATH}/docs.json" "dist/${SPOON_NAME}.docs.json"
+          fi
+
+          if [[ -f "README.md" ]]; then
+            cp "README.md" "dist/README.md"
+          elif [[ -f "${SPOON_PATH}/README.md" ]]; then
+            cp "${SPOON_PATH}/README.md" "dist/README.md"
+          fi
+
+          (cd dist && shasum -a 256 * > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Create tag for manual runs
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists on origin."
+          else
+            git tag "${tag}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${tag}"
+          fi
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > release-notes.md <<EOF
+          ${SPOON_NAME}.spoon
+
+          Install:
+          \`\`\`bash
+          unzip ${SPOON_NAME}.spoon.zip -d ~/.hammerspoon/Spoons
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release.outputs.tag }}"
+          flags=()
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRAFT}" == "true" ]]; then
+            flags+=(--draft)
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_PRERELEASE}" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/* --clobber
+          else
+            gh release create "${tag}" dist/* \
+              --title "${SPOON_NAME} ${tag}" \
+              --notes-file release-notes.md \
+              "${flags[@]}"
+          fi

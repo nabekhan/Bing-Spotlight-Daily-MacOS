@@ -1,0 +1,5 @@
+dist/
+package/
+*.spoon.zip
+.DS_Store
+__MACOSX/
