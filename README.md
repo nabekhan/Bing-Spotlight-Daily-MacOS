@@ -54,23 +54,5 @@ spoon.BingSpotlightDaily:downloadedCount()
 spoon.BingSpotlightDaily:rotateNow()
 ```
 
-## GitHub release
-
-Repository layout:
-
-```text
-.github/workflows/release.yml
-BingSpotlightDaily.spoon/init.lua
-BingSpotlightDaily.spoon/docs.json
-BingSpotlightDaily.spoon/README.md
-README.md
-```
-
-Release by pushing a tag:
-
-```bash
-git tag v1.1.0
-git push origin v1.1.0
-```
-
-Or run **Actions → Release Spoon → Run workflow** and enter a tag.
+## Locales
+[Microsoft LCID](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f)
