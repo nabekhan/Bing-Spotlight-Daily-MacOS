@@ -11,7 +11,7 @@ obj.__index = obj
 -- Metadata
 obj.name = "BingSpotlightDaily"
 obj.version = "1.1"
-obj.author = "ChatGPT, based on the BingDaily Spoon pattern and SpotlightDaily adaptation"
+obj.author = "nabekhan"
 obj.homepage = "https://github.com/Hammerspoon/Spoons"
 obj.license = "MIT"
 
@@ -64,8 +64,8 @@ obj.spotlight_v3_fallback = true
 
 --- BingSpotlightDaily.interval
 --- Variable
---- How often to refresh feeds, in seconds. Defaults to 3 hours.
-obj.interval = 3 * 60 * 60
+--- How often to refresh feeds, in seconds. Defaults to 24 hours.
+obj.interval = 24 * 60 * 60
 
 --- BingSpotlightDaily.rotate_within_cycle
 --- Variable
