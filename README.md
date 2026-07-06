@@ -1,6 +1,6 @@
 # BingSpotlightDaily For Hammerspoon (MacOS)
 
-[Hammerspoon]([https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f](https://www.hammerspoon.org)) wallpaper Spoon for Bing daily images and Windows Spotlight.
+[Hammerspoon](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/70feba9f-294e-491e-b6eb-56532684c37f) wallpaper Spoon for Bing daily images and Windows Spotlight.
 
 
 ## My Config
