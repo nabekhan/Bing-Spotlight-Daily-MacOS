@@ -1,6 +1,7 @@
 # BingSpotlightDaily For Hammerspoon (MacOS)
 
-Hammerspoon wallpaper Spoon for Bing daily images and Windows Spotlight.
+[Hammerspoon](https://www.hammerspoon.org) wallpaper Spoon for Bing daily images and Windows Spotlight.
+
 
 ## My Config
 ```lua
