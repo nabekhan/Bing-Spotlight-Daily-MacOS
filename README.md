@@ -2,6 +2,15 @@
 
 Hammerspoon wallpaper Spoon for Bing daily images and Windows Spotlight.
 
+## My Config
+```lua
+hs.loadSpoon("BingSpotlightDaily")
+spoon.BingSpotlightDaily.sources = {"spotlight"}
+spoon.BingSpotlightDaily.spotlight_locales = "en-CA"
+spoon.BingSpotlightDaily.rotate_every_minutes = 15
+spoon.BingSpotlightDaily:start()
+```
+
 ## Install
 
 ```bash
