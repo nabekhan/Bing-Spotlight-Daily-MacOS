@@ -1,6 +1,6 @@
-# BingSpotlightDaily.spoon
+# BingSpotlightDaily For Hammerspoon (MacOS)
 
-Unified Hammerspoon wallpaper Spoon for Bing daily images and Windows Spotlight.
+Hammerspoon wallpaper Spoon for Bing daily images and Windows Spotlight.
 
 ## Install
 
