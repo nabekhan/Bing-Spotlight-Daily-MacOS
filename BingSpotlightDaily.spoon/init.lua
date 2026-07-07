@@ -94,7 +94,7 @@ obj.save_dir = nil
 
 --- BingSpotlightDaily.cleanup_old_images
 --- Variable
---- If true, delete old Spoon-managed files from save_dir that are no longer part of the active roster. Defaults to true.
+--- If true, after each successful update permanently remove old Spoon-managed image files from save_dir that are no longer part of the active roster. Defaults to true.
 obj.cleanup_old_images = true
 
 --- BingSpotlightDaily.dedupe_images
@@ -119,6 +119,7 @@ obj.min_rotation_seconds = 60
 
 local SETTINGS_PREFIX = "BingSpotlightDaily."
 local FILE_PREFIX = "bsd-"
+local FILE_PREFIX_PATTERN = "^" .. FILE_PREFIX:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
 
 local function log(message)
     print(obj.name .. ": " .. tostring(message))
@@ -146,6 +147,13 @@ local function ensureDir(path)
     if not hs.fs.attributes(path, "mode") then
         os.execute("/bin/mkdir -p " .. shellQuote(path))
     end
+end
+
+local function removeFile(path)
+    if not path or hs.fs.attributes(path, "mode") ~= "file" then return false end
+
+    local result = os.execute("/bin/rm -f " .. shellQuote(path))
+    return (result == true or result == 0) and not hs.fs.attributes(path, "mode")
 end
 
 local function defaultSaveDir()
@@ -375,6 +383,15 @@ local function imageFileName(item)
     return name
 end
 
+local function isManagedImageFile(filename)
+    if type(filename) ~= "string" or not filename:match(FILE_PREFIX_PATTERN) then
+        return false
+    end
+
+    local lower = filename:lower()
+    return lower:match("%.jpe?g$") ~= nil or lower:match("%.png$") ~= nil or lower:match("%.webp$") ~= nil
+end
+
 local function rotationSeconds(count)
     count = tonumber(count) or 0
     if count <= 1 then return nil end
@@ -496,13 +513,18 @@ local function cleanupOldFiles(roster)
     local ok, iter, dirObj = pcall(hs.fs.dir, dir)
     if not ok or type(iter) ~= "function" then return end
 
+    local removed = 0
     for filename in iter, dirObj do
-        if filename ~= "." and filename ~= ".." and filename:match("^" .. FILE_PREFIX) then
+        if isManagedImageFile(filename) then
             local path = pathJoin(dir, filename)
-            if not keep[path] then
-                os.remove(path)
+            if not keep[path] and removeFile(path) then
+                removed = removed + 1
             end
         end
+    end
+
+    if removed > 0 then
+        log("removed " .. tostring(removed) .. " old wallpaper file(s)")
     end
 end
 
@@ -608,7 +630,7 @@ local function dedupeDownloadedRoster(roster)
         else
             duplicates = duplicates + 1
             if obj.cleanup_old_images and item.path and item.path ~= seen[fingerprint].path then
-                os.remove(item.path)
+                removeFile(item.path)
             end
         end
     end

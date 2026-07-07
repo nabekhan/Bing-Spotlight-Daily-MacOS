@@ -55,6 +55,8 @@ spoon.BingSpotlightDaily.cleanup_old_images = true
 spoon.BingSpotlightDaily.dedupe_images = true
 ```
 
+After each successful update, old Spoon-managed images that are no longer in the active roster are permanently removed from this folder.
+
 ## Debug
 
 ```lua
