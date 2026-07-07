@@ -119,7 +119,12 @@ obj.min_rotation_seconds = 60
 
 local SETTINGS_PREFIX = "BingSpotlightDaily."
 local FILE_PREFIX = "bsd-"
-local FILE_PREFIX_PATTERN = "^" .. FILE_PREFIX:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+local IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+local BING_ARCHIVE_URL = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=%s"
+local SPOTLIGHT_V4_URL = "https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=%d&country=%s&locale=%s&fmt=json"
+local SPOTLIGHT_V3_URL = "https://arc.msn.com/v3/Delivery/Placement?pid=209567&fmt=json&ua=WindowsShellClient%%2F0&cdm=1&disphorzres=9999&pl=%s&lc=%s&ctry=%s&time=%s"
+
+-- Pure Utilities
 
 local function log(message)
     print(obj.name .. ": " .. tostring(message))
@@ -142,17 +147,30 @@ local function pathJoin(dir, name)
     return dir .. "/" .. name
 end
 
+local function basename(path)
+    if type(path) ~= "string" then return nil end
+    return path:match("([^/]+)$")
+end
+
+local function hasImageExtension(name)
+    local lower = tostring(name or ""):lower()
+    for _, ext in ipairs(IMAGE_EXTENSIONS) do
+        if lower:match("%." .. ext .. "$") then return true end
+    end
+    return false
+end
+
 local function ensureDir(path)
     if not path or path == "" then return end
     if not hs.fs.attributes(path, "mode") then
-        os.execute("/bin/mkdir -p " .. shellQuote(path))
+        os.execute("/bin/mkdir -p -- " .. shellQuote(path))
     end
 end
 
 local function removeFile(path)
     if not path or hs.fs.attributes(path, "mode") ~= "file" then return false end
 
-    local result = os.execute("/bin/rm -f " .. shellQuote(path))
+    local result = os.execute("/bin/rm -f -- " .. shellQuote(path))
     return (result == true or result == 0) and not hs.fs.attributes(path, "mode")
 end
 
@@ -340,15 +358,15 @@ local function normalizeLocales(setting)
     return out
 end
 
+local function imageKey(item)
+    item = item or {}
+    return tostring(item.source or "") .. "|" .. tostring(item.locale or "") .. "|" .. tostring(item.url or "")
+end
+
 local function feedHash(images)
     local keys = {}
     for _, item in ipairs(images or {}) do
-        local key = table.concat({
-            tostring(item.source or ""),
-            tostring(item.locale or ""),
-            tostring(item.url or "")
-        }, "|")
-        table.insert(keys, key)
+        table.insert(keys, imageKey(item))
     end
     table.sort(keys)
     return urlHash(table.concat(keys, "\n"))
@@ -356,11 +374,7 @@ end
 
 local function addUnique(images, seen, item)
     if not item or not item.url then return end
-    local key = table.concat({
-        tostring(item.source or ""),
-        tostring(item.locale or ""),
-        tostring(item.url or "")
-    }, "|")
+    local key = imageKey(item)
     if seen[key] then return end
     seen[key] = true
     table.insert(images, item)
@@ -376,21 +390,13 @@ local function imageFileName(item)
     if base == "" then base = "image" end
     local name = string.format("%s%s-%s-%s-%s", FILE_PREFIX, source, locale, urlHash(item.url), base)
     name = name:sub(1, 180)
-    local lower = name:lower()
-    if not lower:match("%.jpe?g$") and not lower:match("%.png$") and not lower:match("%.webp$") then
+    if not hasImageExtension(name) then
         name = name .. ".jpg"
     end
     return name
 end
 
-local function isManagedImageFile(filename)
-    if type(filename) ~= "string" or not filename:match(FILE_PREFIX_PATTERN) then
-        return false
-    end
-
-    local lower = filename:lower()
-    return lower:match("%.jpe?g$") ~= nil or lower:match("%.png$") ~= nil or lower:match("%.webp$") ~= nil
-end
+-- Rotation
 
 local function rotationSeconds(count)
     count = tonumber(count) or 0
@@ -413,6 +419,10 @@ local function rotationSeconds(count)
     local seconds = cycle / count
     if seconds < minSeconds then seconds = minSeconds end
     return seconds
+end
+
+local function manualRotationSeconds(count)
+    return rotationSeconds(count) or (tonumber(obj.cycle_seconds) or 24 * 60 * 60)
 end
 
 local function currentRotationSlot()
@@ -448,9 +458,9 @@ scheduleNextRotation = function(nextIn)
 
     local roster = obj.roster or {}
     if #roster <= 1 then return end
-    if not rotationSeconds(#roster) then return end
-
-    nextIn = tonumber(nextIn) or rotationSeconds(#roster) or obj.min_rotation_seconds
+    local secondsPerImage = rotationSeconds(#roster)
+    if not secondsPerImage then return end
+    nextIn = tonumber(nextIn) or secondsPerImage
     if nextIn < 1 then nextIn = 1 end
 
     obj.rotationTimer = hs.timer.doAfter(nextIn, function()
@@ -501,31 +511,88 @@ applyCurrentSlot = function()
     scheduleNextRotation(nextIn)
 end
 
-local function cleanupOldFiles(roster)
-    if not obj.cleanup_old_images then return end
+-- Roster + Storage
+
+local function managedImageFindArgs(dir, keepNames, removeFiles)
+    local args = {
+        "/usr/bin/find",
+        shellQuote(dir),
+        "-maxdepth", "1",
+        "-type", "f",
+        "\\(",
+    }
+
+    for i, ext in ipairs(IMAGE_EXTENSIONS) do
+        if i > 1 then table.insert(args, "-o") end
+        table.insert(args, "-iname")
+        table.insert(args, shellQuote(FILE_PREFIX .. "*." .. ext))
+    end
+
+    table.insert(args, "\\)")
+
+    for name in pairs(keepNames or {}) do
+        table.insert(args, "!")
+        table.insert(args, "-name")
+        table.insert(args, shellQuote(name))
+    end
+
+    table.insert(args, "-print")
+
+    if removeFiles then
+        table.insert(args, "-exec")
+        table.insert(args, "/bin/rm")
+        table.insert(args, "-f")
+        table.insert(args, "--")
+        table.insert(args, "{}")
+        table.insert(args, "+")
+    end
+
+    return args
+end
+
+local function outputLineCount(output)
+    local count = 0
+    for line in tostring(output or ""):gmatch("[^\r\n]+") do
+        if line ~= "" then count = count + 1 end
+    end
+    return count
+end
+
+local function cleanupOldFiles(roster, previousRoster, dryRun)
+    local result = {removed = 0, error = nil, dry_run = dryRun and true or false}
+    if not obj.cleanup_old_images and not dryRun then return result end
 
     local dir = saveDir()
     local keep = {}
+    local keepNames = {}
     for _, item in ipairs(roster or {}) do
-        if item.path then keep[item.path] = true end
+        if item.path then
+            keep[item.path] = true
+            local name = basename(item.path)
+            if name then keepNames[name] = true end
+        end
     end
 
-    local ok, iter, dirObj = pcall(hs.fs.dir, dir)
-    if not ok or type(iter) ~= "function" then return end
-
-    local removed = 0
-    for filename in iter, dirObj do
-        if isManagedImageFile(filename) then
-            local path = pathJoin(dir, filename)
-            if not keep[path] and removeFile(path) then
-                removed = removed + 1
+    if not dryRun then
+        for _, item in ipairs(previousRoster or {}) do
+            if item.path and not keep[item.path] and removeFile(item.path) then
+                result.removed = result.removed + 1
             end
         end
     end
 
-    if removed > 0 then
-        log("removed " .. tostring(removed) .. " old wallpaper file(s)")
+    local output, ok = hs.execute(table.concat(managedImageFindArgs(dir, keepNames, not dryRun), " ") .. " 2>&1")
+    if ok then
+        result.removed = result.removed + outputLineCount(output)
+    elseif output and output ~= "" then
+        result.error = tostring(output)
     end
+
+    return result
+end
+
+local function dryRunCleanup(roster)
+    return cleanupOldFiles(roster, nil, true)
 end
 
 local function buildRoster(images)
@@ -546,9 +613,7 @@ local function buildRoster(images)
     end
 
     table.sort(roster, function(a, b)
-        local ka = table.concat({a.source or "", a.locale or "", a.url or ""}, "|")
-        local kb = table.concat({b.source or "", b.locale or "", b.url or ""}, "|")
-        return ka < kb
+        return imageKey(a) < imageKey(b)
     end)
 
     return roster
@@ -565,12 +630,11 @@ local function existingRosterForSameFeed(candidateRoster)
 
     local candidateKeys = {}
     for _, item in ipairs(candidateRoster) do
-        candidateKeys[table.concat({item.source or "", item.locale or "", item.url or ""}, "|")] = true
+        candidateKeys[imageKey(item)] = true
     end
 
     for _, item in ipairs(obj.roster) do
-        local key = table.concat({item.source or "", item.locale or "", item.url or ""}, "|")
-        if not candidateKeys[key] then return nil end
+        if not candidateKeys[imageKey(item)] then return nil end
     end
 
     return obj.roster
@@ -584,6 +648,16 @@ local function allRosterFilesExist(roster)
         end
     end
     return true
+end
+
+local function availableDownloadedRoster(roster)
+    local available = {}
+    for _, item in ipairs(roster or {}) do
+        if item.path and hs.fs.attributes(item.path, "mode") then
+            table.insert(available, item)
+        end
+    end
+    return available
 end
 
 local function commandFirstLine(command)
@@ -643,6 +717,7 @@ local function dedupeDownloadedRoster(roster)
 end
 
 local function completeRosterUpdate(roster, hash, sameFeed)
+    local previousRoster = obj.roster
     roster = dedupeDownloadedRoster(roster)
 
     if not roster or #roster == 0 then
@@ -660,11 +735,17 @@ local function completeRosterUpdate(roster, hash, sameFeed)
         hs.settings.set(settingsKey("cycle_start"), obj.cycle_start)
     end
 
-    cleanupOldFiles(roster)
+    local cleanup = cleanupOldFiles(roster, previousRoster)
+    if cleanup.error then
+        log("old wallpaper cleanup failed: " .. cleanup.error)
+    elseif cleanup.removed > 0 then
+        log("removed " .. tostring(cleanup.removed) .. " old wallpaper file(s)")
+    end
 
     local secondsPerImage = rotationSeconds(#roster)
     if secondsPerImage then
-        if tonumber(obj.rotate_every_minutes) and tonumber(obj.rotate_every_minutes) > 0 then
+        local fixedRotation = tonumber(obj.rotate_every_minutes)
+        if fixedRotation and fixedRotation > 0 then
             log("retrieved " .. tostring(#roster) .. " wallpaper(s); rotating every " .. formatDuration(secondsPerImage))
         else
             log("retrieved " .. tostring(#roster) .. " wallpaper(s); rotating every " .. formatDuration(secondsPerImage) .. " across a " .. formatDuration(secondsPerImage * #roster) .. " cycle")
@@ -676,6 +757,21 @@ local function completeRosterUpdate(roster, hash, sameFeed)
     applyCurrentSlot()
 end
 
+local function downloadCompletionResult(pending, exitCode, stdOut, stdErr)
+    local available = availableDownloadedRoster(pending and pending.roster)
+    local output = tostring(stdErr or stdOut or exitCode)
+
+    if #available == 0 then
+        return nil, "curl failed; no wallpapers were downloaded: " .. output
+    end
+
+    if exitCode ~= 0 then
+        return available, "curl exited with " .. tostring(exitCode) .. "; using " .. tostring(#available) .. "/" .. tostring(#pending.roster) .. " downloaded wallpaper(s): " .. output
+    end
+
+    return available, nil
+end
+
 local function curlRosterCallback(exitCode, stdOut, stdErr)
     local pending = obj.pending
     obj.task = nil
@@ -683,20 +779,12 @@ local function curlRosterCallback(exitCode, stdOut, stdErr)
 
     if not pending then return end
 
-    local available = {}
-    for _, item in ipairs(pending.roster or {}) do
-        if item.path and hs.fs.attributes(item.path, "mode") then
-            table.insert(available, item)
-        end
-    end
-
-    if #available > 0 then
-        if exitCode ~= 0 then
-            log("curl exited with " .. tostring(exitCode) .. "; using " .. tostring(#available) .. "/" .. tostring(#pending.roster) .. " downloaded wallpaper(s): " .. tostring(stdErr or stdOut or ""))
-        end
+    local available, message = downloadCompletionResult(pending, exitCode, stdOut, stdErr)
+    if available then
+        if message then log(message) end
         completeRosterUpdate(available, pending.hash, pending.sameFeed)
     else
-        log("curl failed; no wallpapers were downloaded: " .. tostring(stdErr or stdOut or exitCode))
+        log(message)
     end
 end
 
@@ -770,6 +858,8 @@ local function activateImages(images)
 
     downloadMissingImages(roster, hash, sameFeed)
 end
+
+-- Source Fetchers
 
 local function spotlightApiErrorMessage(root)
     local batchrsp = type(root) == "table" and root.batchrsp or nil
@@ -865,7 +955,7 @@ end
 
 local function spotlightV4Url(locale)
     return string.format(
-        "https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=%d&country=%s&locale=%s&fmt=json",
+        SPOTLIGHT_V4_URL,
         boundedSpotlightImageCount(),
         urlencode(countryFromLocale(locale)),
         urlencode(locale or "en-US")
@@ -875,7 +965,7 @@ end
 local function spotlightV3Url(locale)
     locale = locale or "en-US"
     return string.format(
-        "https://arc.msn.com/v3/Delivery/Placement?pid=209567&fmt=json&ua=WindowsShellClient%%2F0&cdm=1&disphorzres=9999&dispvertres=9999&pl=%s&lc=%s&ctry=%s&time=%s",
+        SPOTLIGHT_V3_URL,
         urlencode(locale),
         urlencode(locale),
         urlencode(countryFromLocale(locale)),
@@ -918,10 +1008,7 @@ end
 
 local function bingUrl(locale)
     locale = locale or "en-US"
-    return string.format(
-        "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=%s",
-        urlencode(locale)
-    )
+    return string.format(BING_ARCHIVE_URL, urlencode(locale))
 end
 
 local function finalizeCollectedImages(token)
@@ -942,10 +1029,15 @@ local function finalizeCollectedImages(token)
     activateImages(job.images)
 end
 
+local function activeCollectJob(token)
+    if token ~= obj.update_token then return nil end
+    return obj.collectJob
+end
+
 local function requestFinished(token)
-    if token ~= obj.update_token then return end
-    local job = obj.collectJob
+    local job = activeCollectJob(token)
     if not job then return end
+    job.completed_requests = job.completed_requests + 1
     job.pending = job.pending - 1
     if job.pending <= 0 then
         finalizeCollectedImages(token)
@@ -953,28 +1045,21 @@ local function requestFinished(token)
 end
 
 local function collectError(token, source, locale, message)
-    if token ~= obj.update_token then return end
-    local job = obj.collectJob
+    local job = activeCollectJob(token)
     if not job then return end
     table.insert(job.errors, string.format("%s %s: %s", tostring(source), tostring(locale), tostring(message)))
 end
 
 local function collectImages(token, items)
-    if token ~= obj.update_token then return end
-    local job = obj.collectJob
+    local job = activeCollectJob(token)
     if not job then return end
     for _, item in ipairs(items or {}) do
         addUnique(job.images, job.seen, item)
     end
 end
 
-local function requestBingLocale(locale, token)
+local function fetchBing(locale, token)
     hs.http.asyncGet(bingUrl(locale), { ["User-Agent"] = obj.user_agent }, function(status, body, headers)
-        local job = obj.collectJob
-        if token == obj.update_token and job then
-            job.completed_requests = job.completed_requests + 1
-        end
-
         if status ~= 200 or type(body) ~= "string" then
             collectError(token, "bing", locale, "HTTP " .. tostring(status))
             requestFinished(token)
@@ -991,7 +1076,7 @@ local function requestBingLocale(locale, token)
     end)
 end
 
-local function requestSpotlightLocale(locale, token, apiVersion)
+local function fetchSpotlight(locale, token, apiVersion)
     local url = apiVersion == "v3" and spotlightV3Url(locale) or spotlightV4Url(locale)
     local headers = {
         ["User-Agent"] = obj.user_agent,
@@ -1001,12 +1086,8 @@ local function requestSpotlightLocale(locale, token, apiVersion)
     hs.http.asyncGet(url, headers, function(status, body, responseHeaders)
         if status ~= 200 or type(body) ~= "string" then
             if apiVersion ~= "v3" and obj.spotlight_v3_fallback then
-                requestSpotlightLocale(locale, token, "v3")
+                fetchSpotlight(locale, token, "v3")
                 return
-            end
-            local job = obj.collectJob
-            if token == obj.update_token and job then
-                job.completed_requests = job.completed_requests + 1
             end
             collectError(token, "spotlight", locale, "HTTP " .. tostring(status))
             requestFinished(token)
@@ -1021,24 +1102,18 @@ local function requestSpotlightLocale(locale, token, apiVersion)
         end
 
         if #images > 0 then
-            local job = obj.collectJob
-            if token == obj.update_token and job then
-                job.completed_requests = job.completed_requests + 1
-            end
             collectImages(token, images)
             requestFinished(token)
         elseif apiVersion ~= "v3" and obj.spotlight_v3_fallback then
-            requestSpotlightLocale(locale, token, "v3")
+            fetchSpotlight(locale, token, "v3")
         else
-            local job = obj.collectJob
-            if token == obj.update_token and job then
-                job.completed_requests = job.completed_requests + 1
-            end
             collectError(token, "spotlight", locale, err)
             requestFinished(token)
         end
     end)
 end
+
+-- Public API
 
 --- BingSpotlightDaily:update()
 --- Method
@@ -1080,9 +1155,9 @@ function obj:update()
 
     for _, req in ipairs(requests) do
         if req.source == "bing" then
-            requestBingLocale(req.locale, token)
+            fetchBing(req.locale, token)
         else
-            requestSpotlightLocale(req.locale, token, "v4")
+            fetchSpotlight(req.locale, token, "v4")
         end
     end
 
@@ -1099,7 +1174,7 @@ function obj:rotateNow(index)
         return self
     end
 
-    local secondsPerImage = rotationSeconds(#roster) or (tonumber(obj.rotate_every_minutes) and tonumber(obj.rotate_every_minutes) * 60) or (tonumber(obj.cycle_seconds) or 24 * 60 * 60)
+    local secondsPerImage = manualRotationSeconds(#roster)
     local target = tonumber(index)
     if target then
         target = math.floor(target)
@@ -1117,10 +1192,11 @@ end
 
 --- BingSpotlightDaily:status()
 --- Method
---- Print and return current source, locale, file, and rotation status for debugging.
+--- Print and return current source, locale, file, cleanup, and rotation status for debugging.
 function obj:status()
     local roster = obj.roster or {}
     local index, nextIn, secondsPerImage = currentRotationSlot()
+    local cleanupPreview = dryRunCleanup(roster)
     local status = {
         sources = normalizeSources(obj.sources),
         bing_locales = normalizeLocales(obj.bing_locales),
@@ -1131,6 +1207,12 @@ function obj:status()
         roster_hash = obj.roster_hash,
         cycle_start = obj.cycle_start,
         save_dir = saveDir(),
+        installed_save_dir = saveDir(),
+        configured_save_dir = obj.save_dir,
+        cleanup_old_images = obj.cleanup_old_images,
+        dedupe_images = obj.dedupe_images,
+        cleanup_candidates = cleanupPreview.removed,
+        cleanup_error = cleanupPreview.error,
         last_file = obj.last_file,
         last_url = obj.last_url,
         seconds_per_image = secondsPerImage,
